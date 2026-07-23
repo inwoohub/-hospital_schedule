@@ -30,13 +30,13 @@ function validateSchedule(schedule: Schedule, staff: Staff[], totalDays: number,
     ;(['D', 'E', 'N'] as const).forEach((shift) => {
       const workers = staff.filter((person) => schedule[person.id]?.[day] === shift)
       if (workers.length !== 2) issues.push(`${day}일 ${shift} ${workers.length}명`)
-      if (workers.length === 2 && workers[0].role === workers[1].role) issues.push(`${day}일 ${shift} 역할 조합 불일치`)
     })
     const specialWorkers = staff.filter((person) => schedule[person.id]?.[day] === 'S')
     if (specialWorkers.length !== (specialNeeds[day] || 0)) issues.push(`${day}일 S/P ${specialWorkers.length}명`)
   }
   staff.forEach((person) => {
     let nightRun = 0
+    let workRun = 0
     for (let day = 1; day <= totalDays; day += 1) {
       const shift = schedule[person.id]?.[day]
       const prev = schedule[person.id]?.[day - 1]
@@ -51,6 +51,12 @@ function validateSchedule(schedule: Schedule, staff: Staff[], totalDays: number,
         if (nightRun === 1 || nightRun > 3) issues.push(`${day - 1}일 ${person.name} N ${nightRun}일 연속`)
         nightRun = 0
       }
+      if (isWork(shift)) {
+        workRun += 1
+        if (workRun >= 4) issues.push(`${day}일 ${person.name} ${workRun}일 연속 근무`)
+      } else {
+        workRun = 0
+      }
     }
     if (nightRun === 1 || nightRun > 3) issues.push(`${totalDays}일 ${person.name} N ${nightRun}일 연속`)
   })
@@ -63,7 +69,7 @@ function makeSchedule(staff: Staff[], year: number, month: number, specialNeeds:
   const workCount = Object.fromEntries(staff.map((person) => [person.id, 0]))
   const nightCount = Object.fromEntries(staff.map((person) => [person.id, 0]))
   const weekendCount = Object.fromEntries(staff.map((person) => [person.id, 0]))
-  const deadline = Date.now() + 900
+  let deadline = Date.now() + 500
   let bestSchedule: Schedule | null = null
   let bestScore = Number.POSITIVE_INFINITY
   let bestDepth = 0
@@ -81,6 +87,7 @@ function makeSchedule(staff: Staff[], year: number, month: number, specialNeeds:
     const prev = result[person.id][day - 1]
     const prev2 = result[person.id][day - 2]
     const prev3 = result[person.id][day - 3]
+    if (isWork(prev) && isWork(prev2) && isWork(prev3)) return false
     if (shift === 'N' && person.vacations.includes(day + 1)) return false
     if (shift === 'N' && prev === 'N' && prev2 === 'N' && prev3 === 'N') return false
     if (shift === 'N' && prev !== 'N' && day === totalDays) return false
@@ -104,7 +111,7 @@ function makeSchedule(staff: Staff[], year: number, month: number, specialNeeds:
     variance(staff.map((person) => nightCount[person.id])) * 14 +
     variance(staff.map((person) => weekendCount[person.id])) * 5
 
-  const makeDayPlans = (day: number) => {
+  const makeDayPlans = (day: number, allowSubstitution: boolean) => {
     const dayShifts: Array<{ shift: WorkShift; count: number }> = [
       { shift: 'N', count: 2 },
       { shift: 'D', count: 2 },
@@ -145,13 +152,14 @@ function makeSchedule(staff: Staff[], year: number, month: number, specialNeeds:
       const balancedGroups = shift !== 'S' && count === 2
         ? validGroups.filter(([a, b]) => a.role !== b.role)
         : validGroups
-      const choices = (balancedGroups.length ? balancedGroups : validGroups)
+      const choices = (allowSubstitution ? validGroups : balancedGroups)
         .sort((a, b) => {
           const groupScore = (group: Staff[]) => group.reduce((score, person) =>
-            score + workCount[person.id] + (shift === 'N' ? nightCount[person.id] * 3 : 0), 0)
+            score + workCount[person.id] + (shift === 'N' ? nightCount[person.id] * 3 : 0), 0) +
+            (shift !== 'S' && group.length === 2 && group[0].role === group[1].role ? 1000 : 0)
           return groupScore(a) - groupScore(b)
         })
-        .slice(0, 12)
+        .slice(0, 16)
 
       choices.forEach((group) => {
         group.forEach((person) => {
@@ -167,7 +175,7 @@ function makeSchedule(staff: Staff[], year: number, month: number, specialNeeds:
     return plans
   }
 
-  const search = (day: number) => {
+  const search = (day: number, allowSubstitution: boolean) => {
     if (Date.now() >= deadline || solutions >= 40) return
     if (day > bestDepth) {
       bestDepth = day
@@ -184,7 +192,7 @@ function makeSchedule(staff: Staff[], year: number, month: number, specialNeeds:
     }
 
     const weekend = [0, 6].includes(new Date(year, month, day).getDay())
-    const plans = makeDayPlans(day)
+    const plans = makeDayPlans(day, allowSubstitution)
     for (const plan of plans) {
       if (Date.now() >= deadline || solutions >= 40) break
       plan.forEach(({ person, shift }) => {
@@ -196,7 +204,7 @@ function makeSchedule(staff: Staff[], year: number, month: number, specialNeeds:
       staff.forEach((person) => {
         if (!result[person.id][day]) result[person.id][day] = 'O'
       })
-      search(day + 1)
+      search(day + 1, allowSubstitution)
       staff.forEach((person) => {
         const shift = result[person.id][day]
         if (isWork(shift)) {
@@ -209,7 +217,14 @@ function makeSchedule(staff: Staff[], year: number, month: number, specialNeeds:
     }
   }
 
-  search(1)
+  search(1, false)
+  if (!bestSchedule) {
+    deadline = Date.now() + 700
+    solutions = 0
+    bestDepth = 0
+    bestPartial = null
+    search(1, true)
+  }
   const output = bestSchedule || bestPartial || result
   staff.forEach((person) => {
     for (let day = 1; day <= totalDays; day += 1) {
@@ -274,6 +289,11 @@ function App() {
     () => validateSchedule(schedule, staff, totalDays, specialNeeds),
     [schedule, specialNeeds, staff, totalDays],
   )
+  const roleSubstitutions = useMemo(() => Array.from({ length: totalDays }, (_, index) => index + 1)
+    .flatMap((day) => (['D', 'E', 'N'] as const).flatMap((shift) => {
+      const workers = staff.filter((person) => schedule[person.id]?.[day] === shift)
+      return workers.length === 2 && workers[0].role === workers[1].role ? [`${day}일 ${shift}`] : []
+    })), [schedule, staff, totalDays])
 
   const changeMonth = (offset: number) => {
     const next = new Date(year, month + offset, 1)
@@ -494,7 +514,7 @@ function App() {
         </div>
         <div className="rules">
           <p>자동 적용 중인 규칙</p>
-          <div className="rule-tags"><span>타임별 사수 1 + 부사수 1</span><span>S/P 09:00–17:00</span><span>N 다음 S/P 금지</span><span>N 최소 2일 · 최대 3일</span><span>휴가 전날 N 금지</span><span>N 다음은 N 또는 O</span><span>N → O → D 금지</span><span>근무일 균등 배정</span></div>
+          <div className="rule-tags"><span>타임별 사수 1 + 부사수 1</span><span>연속 근무 최대 3일</span><span>불가 시 역할 상호 대체</span><span>S/P 09:00–17:00</span><span>N 다음 S/P 금지</span><span>N 최소 2일 · 최대 3일</span><span>휴가 전날 N 금지</span><span>N 다음은 N 또는 O</span><span>N → O → D 금지</span><span>근무일 균등 배정</span></div>
         </div>
       </section>
 
@@ -542,6 +562,7 @@ function App() {
 
         <div className="calendar-card">
           {algorithmIssues.length > 0 && <div className="schedule-warning"><strong>규칙 검증 문제 {algorithmIssues.length}개</strong><span>{uncoveredDays.length > 0 ? ` · 편성 불가: ${uncoveredDays.slice(0, 8).map((day) => `${day}일`).join(', ')}` : ''}</span><p>{algorithmIssues.slice(0, 4).join(' · ')}{algorithmIssues.length > 4 ? ` 외 ${algorithmIssues.length - 4}개` : ''}</p></div>}
+          {algorithmIssues.length === 0 && roleSubstitutions.length > 0 && <div className="substitution-notice"><strong>역할 대체 투입 {roleSubstitutions.length}회</strong><span>{roleSubstitutions.slice(0, 8).join(', ')}{roleSubstitutions.length > 8 ? ` 외 ${roleSubstitutions.length - 8}회` : ''}</span><p>정상 사수·부사수 조합으로 편성이 불가능해 같은 역할 직원이 임시 투입됐습니다.</p></div>}
           <div className="calendar-head">
             <button onClick={() => changeMonth(-1)} aria-label="이전 달">‹</button>
             <div><h2>{monthTitle}</h2><p>날짜별 근무자를 한눈에 확인하세요</p></div>
