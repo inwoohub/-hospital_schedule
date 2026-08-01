@@ -1,32 +1,148 @@
-# React + TypeScript + Vite
+# 원무팀 근무표
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+월간 교대 근무표를 자동으로 계산하거나 직접 작성할 수 있는 브라우저 기반 도구입니다.
+직원 역할과 휴가, 일별 필요 인원을 반영하고 완성된 근무표를 이미지로 저장할 수 있습니다.
 
-Currently, two official plugins are available:
+## 주요 기능
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- **자동 만들기**: 활성화된 근무 규칙을 만족하는 월간 시간표 계산
+- **직접 채워넣기**: D/E/N/S/P를 직접 배정하고 나머지 직원은 O로 자동 처리
+- **사전 고정 배정**: 자동 계산 전에 특정 직원의 근무 또는 O 지정
+- **규칙 선택**: 필수 규칙은 잠그고 연속 근무·균형 규칙은 선택 적용
+- **불가 원인 안내**: 직원 수, 사수 수, 휴가, 고정 배정 및 선택 규칙 충돌 진단
+- **결과 편집**: 같은 날짜의 직원 근무를 드래그해 교환
+- **직원별 보기**: 개인 근무표와 월간 근무 횟수 확인
+- **이미지 저장**: 달력과 직원별 집계를 PNG로 다운로드
 
-## React Compiler
+## 기본 편성 규칙
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- D/E/N 각 2명, 각 타임에 사수 최소 1명
+- 지정한 휴가 날짜 반영
+- S/P는 토요일 1명, 일요일·공휴일 2명
+- S/P 근무에는 사수 최소 1명
+- 전체 근무일과 N 근무 횟수 차이를 최소화
 
-## Expanding the Oxlint configuration
+연속 근무, D/E/S/P 균형, N 근무 길이 등의 추가 규칙은 화면에서 선택할 수 있습니다.
 
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
+## 스케줄 생성 알고리즘
 
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+자동 만들기는 단순히 날짜별로 직원을 순서대로 넣는 방식이 아닙니다. 한 달 전체를 하나의 **0-1 정수계획(MILP)** 문제로 만든 뒤, HiGHS 계산기로 모든 조건을 동시에 만족하는 조합을 찾습니다.
+
+### 1. 계산 전 가능 여부 확인
+
+본 계산에 들어가기 전에 날짜별로 다음 항목을 먼저 검사합니다.
+
+- 휴가와 고정 O를 제외하고도 필수 인원을 채울 수 있는지
+- D/E/N과 S/P에 배치할 사수가 충분한지
+- 한 직원이 같은 날 여러 근무에 중복 고정되지 않았는지
+- 휴가자에게 근무 또는 O가 고정되지 않았는지
+
+이 단계에서 명확한 충돌이 발견되면 긴 계산을 시작하지 않고 해당 날짜와 원인을 바로 알려줍니다.
+
+### 2. 근무 여부를 이진 변수로 변환
+
+각 직원 `i`, 날짜 `d`, 근무 `s`에 대해 아래 변수를 만듭니다.
+
+```text
+x(i, d, s) = 1  → 직원 i가 d일에 s 근무
+x(i, d, s) = 0  → 해당 근무가 아님
+s ∈ {D, E, N, S/P}
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+O는 별도 근무 변수를 만들지 않습니다. D/E/N/S/P 중 어느 근무에도 선택되지 않은 직원은 결과 변환 단계에서 O가 됩니다. 휴가일은 V로 처리합니다.
+
+### 3. 필수 제약조건 구성
+
+계산기는 다음 조건을 항상 만족해야 합니다.
+
+- 한 직원은 하루에 최대 한 가지 근무만 가능
+- 휴가일의 D/E/N/S/P 변수는 모두 0
+- D/E/N은 날짜마다 정확히 2명
+- S/P는 토요일 1명, 일요일·공휴일 2명
+- D/E/N 각 근무와 S/P에 사수 최소 1명
+- 사전 고정한 근무는 해당 변수를 1로 고정
+- 고정 O는 해당 날짜의 모든 근무 변수를 0으로 고정
+
+필수 조건끼리 충돌하면 선택 규칙을 꺼도 시간표를 만들 수 없습니다.
+
+### 4. 선택 규칙 추가
+
+화면에서 활성화한 규칙은 다음과 같은 제약식으로 추가됩니다.
+
+- D/E/N은 같은 근무를 최소 2일 연속 수행
+- 연속 근무는 최대 4일
+- N은 최소 2일, 최대 3일 연속
+- 휴가 전날 N 금지
+- N 다음 날은 N 또는 O만 가능
+- `N → O → D` 패턴 금지
+
+규칙을 끄면 해당 제약식만 계산 모델에서 제외됩니다.
+
+### 5. 직원별 근무 균형 제한
+
+공정성을 위해 단순 평균 점수만 계산하지 않고, 직원 간 최대 차이를 직접 제한합니다.
+
+| 항목 | 허용되는 최대 차이 |
+| --- | ---: |
+| 전체 근무일 | 1일 |
+| N 근무 | 1회 |
+| D 근무 | 2회 |
+| E 근무 | 2회 |
+| S/P 근무 | 2회 |
+
+예를 들어 전체 근무 균형이 활성화되면 모든 직원의 근무일이 공통 기준값 이상이면서 `기준값 + 1` 이하가 되도록 제한합니다. 따라서 일부 직원에게 근무가 몰리는 조합은 완성표 후보가 될 수 없습니다.
+
+### 6. HiGHS로 월 전체 조합 탐색
+
+완성된 모델은 브라우저의 Web Worker에서 실행됩니다. 화면 조작과 계산을 분리하기 때문에 계산 중에도 페이지가 멈추지 않습니다.
+
+HiGHS는 먼저 불필요한 변수와 제약을 줄이는 전처리를 수행한 뒤 가능한 정수 조합을 탐색합니다. 균형 기준은 이미 제약조건으로 보장되므로, 조건을 모두 통과하는 첫 완성표를 찾으면 반환합니다. 역할과 휴가 구성이 동일한 직원은 탐색 순서를 정리해 이름만 바뀐 같은 조합을 반복해서 찾는 작업도 줄입니다.
+
+### 7. 결과 재검증
+
+계산 결과는 즉시 화면에 표시하지 않습니다. 먼저 D/E/N/S/P 인원, 사수 배치, 휴가, 연속 근무, N 규칙과 균형 차이를 다시 검사합니다.
+
+- 모든 활성 규칙 통과: 완성된 시간표 표시
+- 제한 시간 안에 완성하지 못함: 불가능으로 단정하지 않고 `판정 불가` 안내
+- 불가능이 확인됨: 필수 규칙만 남겨 다시 계산
+- 필수 규칙은 가능함: 선택 규칙을 하나씩 제외해 충돌 원인 진단
+
+중간 계산 결과나 규칙을 위반한 표는 사용자에게 반환하지 않습니다.
+
+### 직접 채워넣기 방식
+
+직접 채워넣기는 최적화 계산기를 사용하지 않습니다. 사용자가 D/E/N/S/P 필수 칸을 모두 선택하면 미선택 직원은 O, 휴가자는 V로 변환합니다. 이후 필수 인원과 사수 배치를 검증한 뒤 자동 생성 결과와 같은 달력·집계 화면을 만듭니다.
+
+## 사용 방법
+
+1. 직원과 역할을 등록합니다.
+2. 직원별 휴가 날짜를 입력합니다.
+3. 필요한 경우 달력에서 근무 또는 O를 미리 고정합니다.
+4. `자동 만들기` 또는 `직접 채워넣기`를 선택합니다.
+5. 완성된 시간표를 확인하고 필요하면 직접 수정합니다.
+6. `이미지 저장`으로 결과를 내려받습니다.
+
+## 로컬 실행
+
+```bash
+npm install
+npm run dev
+```
+
+배포용 결과 확인:
+
+```bash
+npm run build
+npm run preview
+```
+
+## 기술 구성
+
+- React · TypeScript · Vite
+- HiGHS 기반 제약조건 최적화
+- Web Worker를 이용한 백그라운드 계산
+- 브라우저 로컬 저장소를 이용한 설정 보관
+
+## 안내
+
+근무 정보는 현재 브라우저에만 저장됩니다. 자동 또는 직접 작성한 시간표는 최종 확정 전에 담당자가 필수 인원, 휴가, 연속 근무를 다시 확인해 주세요.
