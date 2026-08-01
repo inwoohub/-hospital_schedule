@@ -70,12 +70,13 @@ const requiredRuleLabels = [
   'D/E/N 각 2명',
   'D/E/N 사수 최소 1명',
   '휴가 지정일 반영',
+  '휴가 전날 N 금지',
   'S/P 토 1명 · 일/공휴일 2명',
   'S/P 사수 필수',
 ]
 
 const optionalRuleKeys = (Object.keys(RULE_LABELS) as Array<keyof SchedulingRules>)
-  .filter((rule) => rule !== 'rolePairing')
+  .filter((rule) => rule !== 'rolePairing' && rule !== 'noNightBeforeVacation')
 
 const MANUAL_REQUIRED_RULES: SchedulingRules = {
   ...DEFAULT_SCHEDULING_RULES,
@@ -86,7 +87,8 @@ const MANUAL_REQUIRED_RULES: SchedulingRules = {
   specialBalance: false,
   nightBalance: false,
   nightRunLength: false,
-  noNightBeforeVacation: false,
+  noNightBeforeVacation: true,
+  noEveningDay: false,
   nightFollowup: false,
   noNightOffDay: false,
   workBalance: false,

@@ -17,6 +17,7 @@ export type SchedulingRules = {
   nightBalance: boolean
   nightRunLength: boolean
   noNightBeforeVacation: boolean
+  noEveningDay: boolean
   nightFollowup: boolean
   noNightOffDay: boolean
   workBalance: boolean
@@ -31,6 +32,7 @@ export const DEFAULT_SCHEDULING_RULES: SchedulingRules = {
   nightBalance: true,
   nightRunLength: true,
   noNightBeforeVacation: true,
+  noEveningDay: true,
   nightFollowup: true,
   noNightOffDay: true,
   workBalance: true,
@@ -45,6 +47,7 @@ export const RULE_LABELS: Record<keyof SchedulingRules, string> = {
   nightBalance: 'N 횟수 차이 최대 1회',
   nightRunLength: 'N 최소 2일 · 최대 3일',
   noNightBeforeVacation: '휴가 전날 N 금지',
+  noEveningDay: 'E 다음 D 금지',
   nightFollowup: 'N 다음은 N 또는 O',
   noNightOffDay: 'N → O → D 금지',
   workBalance: '전체 근무 차이 최대 1일',
@@ -54,6 +57,7 @@ export const normalizeSchedulingRules = (rules?: Partial<SchedulingRules>): Sche
   ...DEFAULT_SCHEDULING_RULES,
   ...rules,
   rolePairing: true,
+  noNightBeforeVacation: true,
 })
 
 export type ScheduleSearchOptions = {
@@ -116,6 +120,9 @@ export function validateSchedule(
       const prev = schedule[person.id]?.[day - 1]
       const prev2 = schedule[person.id]?.[day - 2]
       if (person.vacations.includes(day) && shift !== 'V') issues.push(`${day}일 ${person.name} 휴가 미반영`)
+      if (rules.noEveningDay && prev === 'E' && shift === 'D') {
+        issues.push(`${day}일 ${person.name} E 다음 D`)
+      }
       if (rules.nightFollowup && prev === 'N' && shift !== 'N' && shift !== 'O') {
         issues.push(`${day}일 ${person.name} N 다음 ${shift}`)
       }
@@ -294,6 +301,7 @@ export function searchSchedule(
     if (rules.minimumRotatingRun && isRotatingShift(shift) && prev !== shift && person.vacations.includes(day + 1)) return false
     if (rules.minimumRotatingRun && isRotatingShift(shift) && prev !== shift && day === totalDays) return false
     if (rules.noNightBeforeVacation && shift === 'N' && person.vacations.includes(day + 1)) return false
+    if (rules.noEveningDay && prev === 'E' && shift === 'D') return false
     if (rules.nightRunLength && shift === 'N' && prev !== 'N' && person.vacations.includes(day + 1)) return false
     if (rules.nightRunLength && shift === 'N' && prev !== 'N' && day === totalDays) return false
     if (rules.nightRunLength && shift === 'N' && prev !== 'N' && workCount[person.id] + 2 > maxWorkLimit) return false
@@ -679,6 +687,10 @@ export function searchSchedule(
               if (
                 rules.nightFollowup &&
                 personSchedule[day - 1] === 'N'
+              ) valid = false
+              if (
+                rules.noEveningDay &&
+                personSchedule[day - 1] === 'E'
               ) valid = false
               if (
                 rules.noNightOffDay &&

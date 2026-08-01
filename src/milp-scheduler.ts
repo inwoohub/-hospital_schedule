@@ -287,6 +287,21 @@ export function buildScheduleModel(
     }
   }
 
+  if (rules.noEveningDay) {
+    for (let personIndex = 0; personIndex < staff.length; personIndex += 1) {
+      for (let day = 1; day < totalDays; day += 1) {
+        addUpper(
+          `eveningday_${personIndex}_${day}`,
+          [
+            { name: variableName(personIndex, day, 'E'), coef: 1 },
+            { name: variableName(personIndex, day + 1, 'D'), coef: 1 },
+          ],
+          1,
+        )
+      }
+    }
+  }
+
   if (rules.noNightOffDay) {
     for (let personIndex = 0; personIndex < staff.length; personIndex += 1) {
       for (let day = 1; day <= totalDays - 2; day += 1) {

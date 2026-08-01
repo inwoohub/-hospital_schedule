@@ -31,7 +31,7 @@ const diagnosticRuleOrder: Array<keyof SchedulingRules> = [
   'minimumRotatingRun',
   'nightRunLength',
   'nightFollowup',
-  'noNightBeforeVacation',
+  'noEveningDay',
   'noNightOffDay',
   'maxConsecutiveWork',
   'workBalance',
@@ -48,7 +48,8 @@ const requiredOnlyRules = (): SchedulingRules => ({
   specialBalance: false,
   nightBalance: false,
   nightRunLength: false,
-  noNightBeforeVacation: false,
+  noNightBeforeVacation: true,
+  noEveningDay: false,
   nightFollowup: false,
   noNightOffDay: false,
   workBalance: false,
@@ -187,7 +188,7 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
       self.postMessage({
         schedule: null,
         issues: [
-          '선택 규칙을 모두 꺼도 고정 배정, D/E/N 각 2명, 각 타임 사수 최소 1명, 휴가, 날짜별 S/P 인원과 S/P 사수 조건을 동시에 만족할 수 없습니다.',
+          '선택 규칙을 모두 꺼도 고정 배정, D/E/N 각 2명, 각 타임 사수 최소 1명, 휴가, 휴가 전날 N 금지, 날짜별 S/P 인원과 S/P 사수 조건을 동시에 만족할 수 없습니다.',
         ],
         relaxation: null,
         suspectedRules: [],
