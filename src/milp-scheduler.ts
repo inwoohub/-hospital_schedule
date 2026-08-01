@@ -124,6 +124,20 @@ export function buildScheduleModel(
         )
       })
     }
+    // 오프로 고정한 직원은 해당 날짜의 모든 근무 변수를 0으로 고정합니다.
+    for (const personId of fixedAssignments[day]?.O || []) {
+      if (!personId) continue
+      const personIndex = staff.findIndex((person) => person.id === personId)
+      if (personIndex < 0) continue
+      addFixed(
+        `user_fixed_${day}_O_${personIndex}`,
+        WORK_SHIFTS.map((shift) => ({
+          name: variableName(personIndex, day, shift),
+          coef: 1,
+        })),
+        0,
+      )
+    }
   }
 
   // 한 직원은 하루에 한 근무만 가능하며, 휴가일은 모든 근무를 0으로 고정합니다.
@@ -475,6 +489,12 @@ export async function solveMilpSchedule(
           const person = staff.find((candidate) => candidate.id === personId)
           fixedIssues.push(`${day}일 ${shift} 고정 배정${person ? `(${person.name})` : ''} 미반영`)
         }
+      }
+    }
+    for (const personId of fixedAssignments[day]?.O || []) {
+      if (personId && schedule[personId]?.[day] !== 'O') {
+        const person = staff.find((candidate) => candidate.id === personId)
+        fixedIssues.push(`${day}일 O 고정 배정${person ? `(${person.name})` : ''} 미반영`)
       }
     }
   }

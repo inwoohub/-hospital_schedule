@@ -95,6 +95,22 @@ const requiredCapacityIssue = (
         return `${day}일 ${shift} 고정 인원에는 사수가 없어 필수 사수 조건을 만족할 수 없습니다.`
       }
     }
+    for (const personId of (fixedAssignments[day]?.O || []).filter((id): id is string => Boolean(id))) {
+      const person = staff.find((candidate) => candidate.id === personId)
+      if (!person) return `${day}일 오프에 등록되지 않은 직원이 고정되어 있습니다.`
+      if (person.vacations.includes(day)) return `${day}일 오프로 고정한 ${person.name}님은 같은 날 휴가입니다.`
+      if (fixedPeopleForDay.includes(personId)) return `${day}일 ${person.name}님이 근무와 오프에 중복 고정되어 있습니다.`
+      fixedPeopleForDay.push(personId)
+    }
+    const fixedOffIds = new Set((fixedAssignments[day]?.O || []).filter((id): id is string => Boolean(id)))
+    const availableAfterFixedOff = available.filter((person) => !fixedOffIds.has(person.id))
+    if (availableAfterFixedOff.length < required) {
+      return `${day}일은 휴가와 고정 오프를 제외하면 ${availableAfterFixedOff.length}명만 근무할 수 있어 필수 인원 ${required}명을 채울 수 없습니다.`
+    }
+    const seniorsAfterFixedOff = availableAfterFixedOff.filter((person) => person.role === 'senior').length
+    if (seniorsAfterFixedOff < requiredSeniors) {
+      return `${day}일은 고정 오프를 반영하면 사수 ${seniorsAfterFixedOff}명만 근무할 수 있어 필요한 사수 ${requiredSeniors}명을 배치할 수 없습니다.`
+    }
   }
   return null
 }
