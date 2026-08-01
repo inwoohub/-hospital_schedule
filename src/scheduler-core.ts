@@ -1,8 +1,12 @@
 type Shift = 'D' | 'E' | 'N' | 'S' | 'O' | 'V'
-type WorkShift = 'D' | 'E' | 'N' | 'S'
+export type WorkShift = 'D' | 'E' | 'N' | 'S'
 type Role = 'senior' | 'junior'
 export type Staff = { id: string; name: string; role: Role; vacations: number[] }
 export type Schedule = Record<string, Record<number, Shift>>
+export type FixedAssignments = Record<
+  number,
+  Partial<Record<WorkShift, Array<string | null>>>
+>
 export type SchedulingRules = {
   rolePairing: boolean
   minimumRotatingRun: boolean

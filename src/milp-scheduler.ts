@@ -1,12 +1,13 @@
 import {
   normalizeSchedulingRules,
   validateSchedule,
+  type FixedAssignments,
   type Schedule,
   type SchedulingRules,
   type Staff,
+  type WorkShift,
 } from './scheduler-core'
 
-type WorkShift = 'D' | 'E' | 'N' | 'S'
 type Variable = { name: string; coef: number }
 type LinearModel = {
   name: string
@@ -70,6 +71,7 @@ export function buildScheduleModel(
   month: number,
   specialNeeds: Record<number, number>,
   requestedRules: Partial<SchedulingRules>,
+  fixedAssignments: FixedAssignments = {},
 ): LinearModel {
   const glpk = MODEL_CONSTANTS
   const rules = normalizeSchedulingRules(requestedRules)
@@ -104,6 +106,23 @@ export function buildScheduleModel(
       for (const shift of WORK_SHIFTS) {
         binaries.push(variableName(personIndex, day, shift))
       }
+    }
+  }
+
+  // 사용자가 빈 달력에서 미리 선택한 근무는 반드시 해당 날짜·타임에 배치합니다.
+  for (let day = 1; day <= totalDays; day += 1) {
+    for (const shift of WORK_SHIFTS) {
+      const fixedPeople = fixedAssignments[day]?.[shift] || []
+      fixedPeople.forEach((personId, slotIndex) => {
+        if (!personId) return
+        const personIndex = staff.findIndex((person) => person.id === personId)
+        if (personIndex < 0) return
+        addFixed(
+          `user_fixed_${day}_${shift}_${slotIndex}`,
+          [{ name: variableName(personIndex, day, shift), coef: 1 }],
+          1,
+        )
+      })
     }
   }
 
@@ -407,11 +426,12 @@ export async function solveMilpSchedule(
   specialNeeds: Record<number, number>,
   requestedRules: Partial<SchedulingRules>,
   timeLimitSeconds = 90,
+  fixedAssignments: FixedAssignments = {},
 ): Promise<MilpSolveResult> {
   const startedAt = performance.now()
   const rules = normalizeSchedulingRules(requestedRules)
   const totalDays = new Date(year, month + 1, 0).getDate()
-  const model = buildScheduleModel(staff, year, month, specialNeeds, rules)
+  const model = buildScheduleModel(staff, year, month, specialNeeds, rules, fixedAssignments)
   const solved = highs.solve(serializeScheduleModel(model), {
     presolve: 'on',
     time_limit: timeLimitSeconds,
@@ -447,7 +467,21 @@ export async function solveMilpSchedule(
     }
   }
 
-  const issues = validateSchedule(schedule, staff, totalDays, specialNeeds, rules)
+  const fixedIssues: string[] = []
+  for (let day = 1; day <= totalDays; day += 1) {
+    for (const shift of WORK_SHIFTS) {
+      for (const personId of fixedAssignments[day]?.[shift] || []) {
+        if (personId && schedule[personId]?.[day] !== shift) {
+          const person = staff.find((candidate) => candidate.id === personId)
+          fixedIssues.push(`${day}일 ${shift} 고정 배정${person ? `(${person.name})` : ''} 미반영`)
+        }
+      }
+    }
+  }
+  const issues = [
+    ...validateSchedule(schedule, staff, totalDays, specialNeeds, rules),
+    ...fixedIssues,
+  ]
   const hasCompleteSolution = solved.Status === 'Optimal' || issues.length === 0
   const verified = hasCompleteSolution && issues.length === 0
   return {

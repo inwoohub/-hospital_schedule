@@ -6,11 +6,12 @@ import {
   RULE_LABELS,
   normalizeSchedulingRules,
   validateSchedule,
+  type FixedAssignments,
   type SchedulingRules,
+  type WorkShift,
 } from './scheduler-core'
 
 type Shift = 'D' | 'E' | 'N' | 'S' | 'O' | 'V'
-type WorkShift = 'D' | 'E' | 'N' | 'S'
 type Role = 'senior' | 'junior'
 export type Staff = { id: string; name: string; role: Role; vacations: number[] }
 export type Schedule = Record<string, Record<number, Shift>>
@@ -75,6 +76,17 @@ const requiredRuleLabels = [
 const optionalRuleKeys = (Object.keys(RULE_LABELS) as Array<keyof SchedulingRules>)
   .filter((rule) => rule !== 'rolePairing')
 
+type FixedAssignmentsByMonth = Record<string, FixedAssignments>
+
+const loadFixedAssignments = (): FixedAssignmentsByMonth => {
+  try {
+    const saved = localStorage.getItem('nurse-scheduler-fixed-assignments')
+    return saved ? JSON.parse(saved) as FixedAssignmentsByMonth : {}
+  } catch {
+    return {}
+  }
+}
+
 function App() {
   const today = new Date()
   const [year, setYear] = useState(today.getFullYear())
@@ -113,6 +125,7 @@ function App() {
       return DEFAULT_SCHEDULING_RULES
     }
   })
+  const [fixedAssignmentsByMonth, setFixedAssignmentsByMonth] = useState<FixedAssignmentsByMonth>(loadFixedAssignments)
   const schedulerWorkerRef = useRef<Worker | null>(null)
   const generationStartedAtRef = useRef(0)
   const [newName, setNewName] = useState('')
@@ -126,9 +139,44 @@ function App() {
   const [toast, setToast] = useState('')
   const totalDays = daysInMonth(year, month)
   const firstWeekday = new Date(year, month, 1).getDay()
+  const fixedMonthKey = `${year}-${String(month + 1).padStart(2, '0')}`
+  const fixedAssignments = useMemo(() => {
+    const source = fixedAssignmentsByMonth[fixedMonthKey] || {}
+    const normalized: FixedAssignments = {}
+    for (let day = 1; day <= totalDays; day += 1) {
+      const assignedToday = new Set<string>()
+      const dayAssignments: Partial<Record<WorkShift, Array<string | null>>> = {}
+      for (const shift of ['D', 'E', 'N', 'S'] as WorkShift[]) {
+        const slotCount = shift === 'S' ? specialNeeds[day] || 0 : 2
+        if (slotCount === 0) continue
+        dayAssignments[shift] = Array.from({ length: slotCount }, (_, slotIndex) => {
+          const personId = source[day]?.[shift]?.[slotIndex]
+          const person = personId ? staff.find((candidate) => candidate.id === personId) : undefined
+          if (!person || person.vacations.includes(day) || assignedToday.has(person.id)) return null
+          assignedToday.add(person.id)
+          return person.id
+        })
+      }
+      if (Object.values(dayAssignments).some((slots) => slots?.some(Boolean))) normalized[day] = dayAssignments
+    }
+    return normalized
+  }, [fixedAssignmentsByMonth, fixedMonthKey, specialNeeds, staff, totalDays])
+  const fixedAssignmentCount = useMemo(() => Object.values(fixedAssignments)
+    .flatMap((dayAssignments) => Object.values(dayAssignments))
+    .flatMap((slots) => slots || [])
+    .filter(Boolean).length, [fixedAssignments])
 
   useEffect(() => localStorage.setItem('nurse-scheduler-staff', JSON.stringify(staff)), [staff])
   useEffect(() => localStorage.setItem('nurse-scheduler-rules', JSON.stringify(rules)), [rules])
+  useEffect(() => localStorage.setItem(
+    'nurse-scheduler-fixed-assignments',
+    JSON.stringify(fixedAssignmentsByMonth),
+  ), [fixedAssignmentsByMonth])
+  useEffect(() => {
+    const current = fixedAssignmentsByMonth[fixedMonthKey] || {}
+    if (JSON.stringify(current) === JSON.stringify(fixedAssignments)) return
+    setFixedAssignmentsByMonth((stored) => ({ ...stored, [fixedMonthKey]: fixedAssignments }))
+  }, [fixedAssignments, fixedAssignmentsByMonth, fixedMonthKey])
   useEffect(() => {
     let active = true
     setHolidayError('')
@@ -158,7 +206,7 @@ function App() {
     setGenerationFailure(null)
     setEditMode(false)
     setDraggedAssignment(null)
-  }, [month, specialNeeds, staff, year])
+  }, [fixedAssignments, month, specialNeeds, staff, year])
   useEffect(() => {
     if (!isGenerating) return
     const updateElapsed = () => setElapsedSeconds(Math.max(0,
@@ -301,7 +349,7 @@ function App() {
       setToast('시간표 계산 중 오류가 발생했어요. 다시 시도해 주세요.')
       window.setTimeout(() => setToast(''), 3600)
     }
-    worker.postMessage({ staff, year, month, specialNeeds, rules: activeRules })
+    worker.postMessage({ staff, year, month, specialNeeds, rules: activeRules, fixedAssignments })
   }
 
   const relaxRulesAndGenerate = (ruleKeys: Array<keyof SchedulingRules>) => {
@@ -379,6 +427,46 @@ function App() {
     onDrop: (event: DragEvent<HTMLElement>) => swapAssignment(event, personId, day),
     onDragEnd: () => setDraggedAssignment(null),
   })
+
+  const setFixedAssignment = (day: number, shift: WorkShift, slotIndex: number, personId: string) => {
+    setFixedAssignmentsByMonth((stored) => {
+      const monthAssignments = structuredClone(stored[fixedMonthKey] || {}) as FixedAssignments
+      const dayAssignments = monthAssignments[day] || {}
+      for (const candidateShift of ['D', 'E', 'N', 'S'] as WorkShift[]) {
+        dayAssignments[candidateShift] = (dayAssignments[candidateShift] || []).map((assignedId) =>
+          personId && assignedId === personId ? null : assignedId)
+      }
+      const slotCount = shift === 'S' ? specialNeeds[day] || 0 : 2
+      const slots = Array.from({ length: slotCount }, (_, index) => dayAssignments[shift]?.[index] || null)
+      slots[slotIndex] = personId || null
+      dayAssignments[shift] = slots
+      monthAssignments[day] = dayAssignments
+      return { ...stored, [fixedMonthKey]: monthAssignments }
+    })
+    setGenerationFailure(null)
+  }
+
+  const clearFixedAssignments = () => {
+    setFixedAssignmentsByMonth((stored) => ({ ...stored, [fixedMonthKey]: {} }))
+    setToast(`${monthTitle} 고정 근무를 모두 해제했어요.`)
+    window.setTimeout(() => setToast(''), 2600)
+  }
+
+  const fixedSlotOptions = (day: number, shift: WorkShift, slotIndex: number) => {
+    const currentPersonId = fixedAssignments[day]?.[shift]?.[slotIndex] || ''
+    const assignedToday = new Set(Object.values(fixedAssignments[day] || {})
+      .flatMap((slots) => slots || [])
+      .filter((personId): personId is string => Boolean(personId)))
+    const capacity = shift === 'S' ? specialNeeds[day] || 0 : 2
+    const otherPeopleInShift = (fixedAssignments[day]?.[shift] || [])
+      .filter((personId, index): personId is string => index !== slotIndex && Boolean(personId))
+    const seniorAlreadyFixed = otherPeopleInShift.some((personId) =>
+      staff.find((person) => person.id === personId)?.role === 'senior')
+    const thisSelectionMustBeSenior = otherPeopleInShift.length === capacity - 1 && !seniorAlreadyFixed
+    return staff.filter((person) => !person.vacations.includes(day) &&
+      (!assignedToday.has(person.id) || person.id === currentPersonId) &&
+      (!thisSelectionMustBeSenior || person.role === 'senior' || person.id === currentPersonId))
+  }
 
   const toggleEditMode = () => {
     setEditMode((current) => !current)
@@ -637,7 +725,71 @@ function App() {
             <div><h2>{monthTitle}</h2><p>날짜별 근무자를 한눈에 확인하세요</p></div>
             <button onClick={() => changeMonth(1)} aria-label="다음 달">›</button>
           </div>
-          {!scheduleCreated ? <div className="schedule-empty" aria-live="polite">
+          {!scheduleCreated ? <div className={`schedule-empty ${!isGenerating && !generationFailure ? 'idle' : ''}`} aria-live="polite">
+            <div className="blank-calendar-preview" aria-hidden={isGenerating || Boolean(generationFailure)}>
+              <div className="weekdays">{['일', '월', '화', '수', '목', '금', '토'].map((weekday, index) => <div key={weekday} className={index === 0 ? 'sun' : index === 6 ? 'sat' : ''}>{weekday}</div>)}</div>
+              <div className="calendar-grid">
+                {Array.from({ length: firstWeekday }, (_, index) => <div className="day-cell empty" key={`preview-empty-${index}`} />)}
+                {Array.from({ length: totalDays }, (_, index) => {
+                  const day = index + 1
+                  const weekday = new Date(year, month, day).getDay()
+                  const holidayNames = holidayNamesByDay[day]
+                  const vacationNames = staff
+                    .filter((person) => person.vacations.includes(day))
+                    .map((person) => person.name.length === 3 ? person.name.slice(1) : person.name)
+                  return <article className={`day-cell ${holidayNames ? 'holiday' : ''}`} key={`preview-${day}`}>
+                    <div className={`day-number ${holidayNames || weekday === 0 ? 'sun' : weekday === 6 ? 'sat' : ''}`}>
+                      <span>{day}</span>
+                      {holidayNames && <small>{holidayNames.join(' · ')}</small>}
+                    </div>
+                    <div className="day-shifts blank-day-shifts">
+                      {(['D', 'E', 'N'] as const).map((shift) => <div className={`day-shift shift-${shift}`} key={shift}>
+                        <span>{shift}</span>
+                        <div>{Array.from({ length: 2 }, (_, slotIndex) => {
+                          const personId = fixedAssignments[day]?.[shift]?.[slotIndex] || ''
+                          return <select
+                            className={`fixed-slot ${personId ? 'selected' : ''}`}
+                            aria-label={`${day}일 ${shift} ${slotIndex + 1}번째 고정 직원`}
+                            title={personId ? '고정된 직원 변경 또는 해제' : '클릭해서 직원을 고정 배정'}
+                            key={slotIndex}
+                            value={personId}
+                            disabled={isGenerating || Boolean(generationFailure)}
+                            onChange={(event) => setFixedAssignment(day, shift, slotIndex, event.target.value)}
+                          >
+                            <option value="">＋</option>
+                            {fixedSlotOptions(day, shift, slotIndex).map((person) => <option key={person.id} value={person.id}>
+                              {person.name}
+                            </option>)}
+                          </select>
+                        })}</div>
+                      </div>)}
+                      {(specialNeeds[day] || 0) > 0 && <div className="day-shift shift-S">
+                        <span>S</span>
+                        <div>{Array.from({ length: specialNeeds[day] || 0 }, (_, slotIndex) => {
+                          const personId = fixedAssignments[day]?.S?.[slotIndex] || ''
+                          return <select
+                            className={`fixed-slot ${personId ? 'selected' : ''}`}
+                            aria-label={`${day}일 S/P ${slotIndex + 1}번째 고정 직원`}
+                            title={personId ? '고정된 직원 변경 또는 해제' : '클릭해서 직원을 고정 배정'}
+                            key={slotIndex}
+                            value={personId}
+                            disabled={isGenerating || Boolean(generationFailure)}
+                            onChange={(event) => setFixedAssignment(day, 'S', slotIndex, event.target.value)}
+                          >
+                            <option value="">＋</option>
+                            {fixedSlotOptions(day, 'S', slotIndex).map((person) => <option key={person.id} value={person.id}>
+                              {person.name}
+                            </option>)}
+                          </select>
+                        })}</div>
+                      </div>}
+                    </div>
+                    {vacationNames.length > 0 && <div className="day-vacation">휴가 {vacationNames.join(' · ')}</div>}
+                  </article>
+                })}
+              </div>
+            </div>
+            <div className="schedule-empty-content">
             {isGenerating ? <>
               <div className="large-spinner"><span className="loading-spinner" aria-hidden="true" /></div>
               <strong>{monthTitle} 시간표를 계산하고 있어요</strong>
@@ -683,10 +835,16 @@ function App() {
               </div>}
             </> : <>
               <span>✦</span>
-              <strong>{monthTitle} 시간표를 준비해 볼까요?</strong>
-              <p>직원과 휴가 정보를 확인한 뒤 버튼을 눌러 주세요.<br />잠금 표시가 없는 규칙은 위에서 자유롭게 선택할 수 있습니다.</p>
-              <button className="generate" onClick={() => generate()}>시간표 만들기</button>
+              <strong>{monthTitle} 고정 근무를 먼저 지정할 수 있어요</strong>
+              <p>달력의 빈 칸을 눌러 직원을 선택하세요. 선택하지 않은 칸은 자동으로 배정됩니다.<br />고정 없이 바로 시간표를 만들어도 됩니다.</p>
+              <div className="fixed-assignment-actions">
+                {fixedAssignmentCount > 0 && <button className="clear-fixed" onClick={clearFixedAssignments}>
+                  {fixedAssignmentCount}명 고정 · 전체 해제
+                </button>}
+                <button className="generate" onClick={() => generate()}>시간표 만들기</button>
+              </div>
             </>}
+            </div>
           </div> : <>
           <div className="calendar-filter">
             <label htmlFor="schedule-filter">직원별 보기</label>
@@ -729,10 +887,6 @@ function App() {
                         <span>S</span>
                         <div>{staff.filter((person) => schedule[person.id]?.[day] === 'S').map((person) => <b {...workerDragProps(person.id, day)} className={`${person.role} ${editMode ? 'draggable-worker' : ''} ${draggedAssignment?.personId === person.id && draggedAssignment.day === day ? 'dragging' : ''}`} key={person.id} title={editMode ? '같은 날짜의 다른 직원에게 드래그해 근무 교환' : 'S/P 09:00–17:00'}>{person.name.length === 3 ? person.name.slice(1) : person.name}</b>)}</div>
                       </div>}
-                      {editMode && <div className="day-shift shift-O edit-off">
-                        <span>O</span>
-                        <div>{staff.filter((person) => schedule[person.id]?.[day] === 'O').map((person) => <b {...workerDragProps(person.id, day)} className={`off-worker draggable-worker ${draggedAssignment?.personId === person.id && draggedAssignment.day === day ? 'dragging' : ''}`} key={person.id} title="다른 직원에게 드래그해 근무 교환">{person.name.length === 3 ? person.name.slice(1) : person.name}</b>)}</div>
-                      </div>}
                     </>}
                   </div>
                   {!focusedPerson && staff.some((person) => schedule[person.id]?.[day] === 'V') && <div className="day-vacation">휴가 {staff.filter((person) => schedule[person.id]?.[day] === 'V').map((person) => person.name.length === 3 ? person.name.slice(1) : person.name).join(' · ')}</div>}
@@ -763,7 +917,27 @@ function App() {
           </>}
         </div>
       </section>
-      <footer>이대목동병원 사무부 원무팀 · 모든 근무 정보는 현재 브라우저에만 저장됩니다.</footer>
+      <footer className="site-footer">
+        <div className="footer-main">
+          <div className="footer-inner">
+            <div className="footer-brand">
+              <strong>이대목동병원 사무부 원무팀 근무표</strong>
+              <span>근무표 작성과 검토를 지원하는 내부용 시스템</span>
+            </div>
+            <div className="footer-notice">
+              <strong>안전한 사용을 위해</strong>
+              <span>자동 생성된 시간표는 최종 확정 전 담당자가 다시 확인해 주세요.<br />모든 근무 정보는 현재 브라우저에만 저장됩니다.</span>
+            </div>
+          </div>
+        </div>
+        <div className="footer-bottom">
+          <div>
+            <span>© 2026 원무팀 근무표. All rights reserved.</span>
+            <span>최종 업데이트 2026.08.01</span>
+            <span>Internal Scheduling Support System</span>
+          </div>
+        </div>
+      </footer>
       {toast && <div className="toast">{toast}</div>}
     </main>
   )

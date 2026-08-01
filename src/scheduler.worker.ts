@@ -5,8 +5,10 @@ import {
   DEFAULT_SCHEDULING_RULES,
   RULE_LABELS,
   normalizeSchedulingRules,
+  type FixedAssignments,
   type SchedulingRules,
   type Staff,
+  type WorkShift,
 } from './scheduler-core'
 import { solveMilpSchedule } from './milp-scheduler'
 
@@ -16,6 +18,7 @@ type WorkerRequest = {
   month: number
   specialNeeds: Record<number, number>
   rules: SchedulingRules
+  fixedAssignments: FixedAssignments
 }
 
 type Relaxation = {
@@ -56,8 +59,10 @@ const requiredCapacityIssue = (
   year: number,
   month: number,
   specialNeeds: Record<number, number>,
+  fixedAssignments: FixedAssignments,
 ) => {
   const totalDays = new Date(year, month + 1, 0).getDate()
+  const shifts: WorkShift[] = ['D', 'E', 'N', 'S']
   for (let day = 1; day <= totalDays; day += 1) {
     const available = staff.filter((person) => !person.vacations.includes(day))
     const specialCount = specialNeeds[day] || 0
@@ -70,14 +75,34 @@ const requiredCapacityIssue = (
     if (seniors < requiredSeniors) {
       return `${day}일은 D/E/N 각 사수 1명${specialCount > 0 ? '과 S/P 사수' : ''}을 동시에 배치하려면 사수 ${requiredSeniors}명이 필요하지만 ${seniors}명만 가능합니다.`
     }
+
+    const fixedPeopleForDay: string[] = []
+    for (const shift of shifts) {
+      const fixedPeople = (fixedAssignments[day]?.[shift] || []).filter((personId): personId is string => Boolean(personId))
+      const capacity = shift === 'S' ? specialCount : 2
+      if (fixedPeople.length > capacity) {
+        return `${day}일 ${shift}에 고정한 직원이 ${fixedPeople.length}명이라 필수 인원 ${capacity}명을 초과합니다.`
+      }
+      for (const personId of fixedPeople) {
+        const person = staff.find((candidate) => candidate.id === personId)
+        if (!person) return `${day}일 ${shift}에 등록되지 않은 직원이 고정되어 있습니다.`
+        if (person.vacations.includes(day)) return `${day}일 ${shift}에 고정한 ${person.name}님은 같은 날 휴가입니다.`
+        if (fixedPeopleForDay.includes(personId)) return `${day}일 ${person.name}님이 두 개 이상의 근무에 중복 고정되어 있습니다.`
+        fixedPeopleForDay.push(personId)
+      }
+      if (capacity > 0 && fixedPeople.length === capacity &&
+        !fixedPeople.some((personId) => staff.find((person) => person.id === personId)?.role === 'senior')) {
+        return `${day}일 ${shift} 고정 인원에는 사수가 없어 필수 사수 조건을 만족할 수 없습니다.`
+      }
+    }
   }
   return null
 }
 
 self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
-  const { staff, year, month, specialNeeds } = event.data
+  const { staff, year, month, specialNeeds, fixedAssignments = {} } = event.data
   const rules = normalizeSchedulingRules(event.data.rules)
-  const capacityIssue = requiredCapacityIssue(staff, year, month, specialNeeds)
+  const capacityIssue = requiredCapacityIssue(staff, year, month, specialNeeds, fixedAssignments)
 
   if (capacityIssue) {
     self.postMessage({
@@ -101,6 +126,7 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
       specialNeeds,
       rules,
       300,
+      fixedAssignments,
     )
 
     if (result.status === 'feasible' && result.schedule) {
@@ -138,18 +164,19 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
       specialNeeds,
       requiredOnlyRules(),
       30,
+      fixedAssignments,
     )
 
     if (requiredResult.status === 'infeasible') {
       self.postMessage({
         schedule: null,
         issues: [
-          '선택 규칙을 모두 꺼도 D/E/N 각 2명, 각 타임 사수 최소 1명, 휴가, 날짜별 S/P 인원과 S/P 사수 조건을 동시에 만족할 수 없습니다.',
+          '선택 규칙을 모두 꺼도 고정 배정, D/E/N 각 2명, 각 타임 사수 최소 1명, 휴가, 날짜별 S/P 인원과 S/P 사수 조건을 동시에 만족할 수 없습니다.',
         ],
         relaxation: null,
         suspectedRules: [],
         failureKind: 'infeasible',
-        message: '필수 규칙만으로도 시간표가 존재하지 않는 것을 계산기가 확인했습니다. 직원 수·사수 수·휴가 날짜를 확인해 주세요.',
+        message: '고정 배정과 필수 규칙만으로도 시간표가 존재하지 않는 것을 계산기가 확인했습니다. 고정 근무·직원 수·사수 수·휴가 날짜를 확인해 주세요.',
       })
       return
     }
@@ -182,6 +209,7 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
         specialNeeds,
         { ...rules, [rule]: false },
         20,
+        fixedAssignments,
       )
       if (diagnostic.status === 'feasible') {
         relaxation = {
